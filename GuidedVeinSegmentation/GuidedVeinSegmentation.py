@@ -115,7 +115,7 @@ class GuidedVeinSegmentationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
 
         # Buttons
-        self.ui.applyButton.connect('clicked(bool)', self.onApplyButton)
+        self.ui.applyButton.connect('clicked(bool)', self.onApply)
 
         # Make sure parameter node is initialized (needed for module reload)
         self.initializeParameterNode()
@@ -188,7 +188,21 @@ class GuidedVeinSegmentationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             # ui element that needs connection.
             self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
 
-    def onApplyButton(self) -> None:
+    def parameterSetChanged(self, newParameterSet):
+        # When all nodes are deleted, the wrapper outputs errors and alien nodes appear in the selector.
+        if not newParameterSet:
+            self.setParameterNode(None)
+            return
+        nextParameterNode = GuidedVeinSegmentationParameterNode(newParameterSet)
+        self.setParameterNode(nextParameterNode)
+
+    def updateSliceViews(self):
+        parameterNode = self._parameterNode
+        if (not parameterNode) or (not parameterNode.inputVolume):
+            return
+        slicer.util.setSliceViewerLayers(background = parameterNode.inputVolume.GetID(), fit = True)
+
+    def onApply(self) -> None:
         """
         Run processing when user clicks "Apply" button.
         """

@@ -2,7 +2,7 @@
 
 This module is intended to create targeted (small) segmentations from a contrast enhanced CT angioscan using fiducial points, and to finally extract centerlines from the surface model. Overall, it's a small wrapper for common arterial segmentation tasks.
 
-![Texte alternatif](QuickArterySegmentationScreenshot_1.png)
+![Texte alternatif](QuickArterySegmentation_1.png)
 
 It assumes that data acquisition of the input volume is nearly perfect, and that fiducial points are placed in the contrasted lumen.
 
@@ -36,7 +36,7 @@ Check this to call the 'Extract centerline' module. It is optional by default be
 
 **Notes**
 
-If the centerlines are not extracted though the segmentation is good, interaction is required. Smoothing with ‘Fill holes’ at minimal kernel size helps to create centerlines (smoothing may be faster using the 3D brush). Afterwards, work should be continued directly in ‘Extract centerline’ module obviously.
+If the centerlines are not extracted though the segmentation is good, interaction is required. Smoothing with ‘Fill holes’ at minimal kernel size helps to create centerlines (smoothing may be faster using the 3D brush). Afterwards, work should be continued directly in ‘Extract centerline’ module.
 
 ## Acknowledgement
 

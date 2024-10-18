@@ -15,6 +15,12 @@ from slicer.parameterNodeWrapper import (
 )
 
 from slicer import vtkMRMLScalarVolumeNode
+from slicer import vtkMRMLSliceNode
+from slicer import vtkMRMLMarkupsFiducialNode
+from slicer import vtkMRMLMarkupsCurveNode
+from slicer import vtkMRMLSegmentationNode
+from slicer import vtkMRMLModelNode
+from slicer import vtkMRMLMarkupsROINode
 
 #
 # QuickArterySegmentation
@@ -57,9 +63,10 @@ class QuickArterySegmentationParameterNode:
     optionExtractCenterlines: bool = False
     outputSegmentationNode: slicer.vtkMRMLSegmentationNode
     # These do not have widget counterparts.
+    inputVolumeNode: slicer.vtkMRMLScalarVolumeNode
+    outputFiducialNode: slicer.vtkMRMLMarkupsFiducialNode # 'Extract centerline' endpoints
     outputCenterlineModelNode: slicer.vtkMRMLModelNode
     outputCenterlineCurveNode: slicer.vtkMRMLMarkupsCurveNode
-
 
 #
 # QuickArterySegmentationWidget
@@ -92,6 +99,11 @@ class QuickArterySegmentationWidget(ScriptedLoadableModuleWidget, VTKObservation
     self.layout.addWidget(uiWidget)
     self.ui = slicer.util.childWidgetVariables(uiWidget)
 
+    self.workSpaceWidgets = [self.ui.inputsCollapsibleButton,
+                        self.ui.floodFillingCollapsibleGroupBox,
+                        self.ui.extractCenterlinesCheckBox,
+                        self.ui.applyButton]
+
     # Set scene in MRML widgets. Make sure that in Qt designer the top-level qMRMLWidget's
     # "mrmlSceneChanged(vtkMRMLScene*)" signal in is connected to each MRML widget's.
     # "setMRMLScene(vtkMRMLScene*)" slot.
@@ -100,10 +112,13 @@ class QuickArterySegmentationWidget(ScriptedLoadableModuleWidget, VTKObservation
     # Create logic class. Logic implements all computations that should be possible to run
     # in batch mode, without a graphical user interface.
     self.logic = QuickArterySegmentationLogic()
+    self.ui.parameterSetSelector.addAttribute("vtkMRMLScriptedModuleNode", "ModuleName", self.moduleName)
 
     self.ui.floodFillingCollapsibleGroupBox.checked = False
 
     # Connections
+    self.ui.parameterSetSelector.connect('currentNodeChanged(vtkMRMLNode*)', self.parameterSetChanged)
+    self.ui.parameterSetSelector.connect('currentNodeChanged(vtkMRMLNode*)', self.updateSliceViews)
 
     # These connections ensure that we update parameter node when scene is closed
     self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
@@ -115,10 +130,7 @@ class QuickArterySegmentationWidget(ScriptedLoadableModuleWidget, VTKObservation
     self.ui.restoreSliceViewToolButton.connect("clicked()", self.onRestoreSliceViews)
 
     # Buttons
-    self.ui.applyButton.connect('clicked(bool)', self.onApplyButton)
-
-    # Make sure parameter node is initialized (needed for module reload)
-    self.initializeParameterNode()
+    self.ui.applyButton.connect('clicked(bool)', self.onApply)
 
     # A hidden one for the curious! For developers.
     shortcut = qt.QShortcut(self.ui.QuickArterySegmentation)
@@ -132,30 +144,27 @@ class QuickArterySegmentationWidget(ScriptedLoadableModuleWidget, VTKObservation
     if not em.installExtensionFromServer(extensionName, restart):
       raise ValueError(_("Failed to install {nameOfExtension} extension").format(nameOfExtension=extensionName))
 
+    # Let the parameter set be None; a study can thus be selected from a loaded saved scene.
+    if self.ui.parameterSetSelector.nodeCount():
+      wasBlocked = self.ui.parameterSetSelector.blockSignals(True)
+      self.ui.parameterSetSelector.setCurrentNode(None)
+      self.ui.parameterSetSelector.blockSignals(wasBlocked)
+
+    # A parameter set must be selected to use the module.
+    self.enableWorkSpace()
+
   def inform(self, message) -> None:
     slicer.util.showStatusMessage(message, 3000)
     logging.info(message)
 
   def onFiducialNode(self, node) -> None:
-    if not self._parameterNode:
+    if not node:
       return
-    self._parameterNode.inputFiducialNode = node # This functions seems to be called before parameter node gets updated.
-    if node is None:
-        return
     numberOfControlPoints = node.GetNumberOfControlPoints()
     if numberOfControlPoints < 2:
         self.inform(_("Fiducial node must have at least 2 points."))
         self.ui.inputFiducialSelector.setCurrentNode(None)
         return
-    # Update UI with previous referenced segmentation. May be changed before logic.process().
-    referencedSegmentationNode = node.GetNodeReference("OutputSegmentation")
-    if referencedSegmentationNode:
-        self.ui.outputSegmentationSelector.setCurrentNode(node.GetNodeReference("OutputSegmentation"))
-    # Show last known volume used for segmentation.
-    referencedInputVolume = node.GetNodeReference("InputVolumeNode")
-    self.updateSliceViews(referencedInputVolume)
-    # Reuse last known parameters
-    self.updateGUIParametersFromInputNode(node)
 
   # The ROI will have to be manually adjusted.
   def preFitROI(self) -> None:
@@ -185,35 +194,25 @@ class QuickArterySegmentationWidget(ScriptedLoadableModuleWidget, VTKObservation
     inputROINode.SetRadiusXYZ((lengths[0] / 2, lengths[1] / 2, lengths[2] / 2))
     inputROINode.SetDisplayVisibility(True)
 
-  def updateSliceViews(self, volumeNode) -> None:
-    # Don't allow None node, is very annoying.
-    if not volumeNode:
+  def updateSliceViews(self) -> None:
+    if (not self._parameterNode):
         return
+    volumeNode = self._parameterNode.inputVolumeNode
+    if not volumeNode:
+      return
     sliceNode = self._parameterNode.inputSliceNode
     if not sliceNode:
         return
     # Don't upset UI if we have the right volume node
     sliceWidget = slicer.app.layoutManager().sliceWidget(sliceNode.GetName())
-    backgroudVolumeNode = sliceWidget.sliceLogic().GetBackgroundLayer().GetVolumeNode()
-    if volumeNode == backgroudVolumeNode:
+    backgroundVolumeNode = sliceWidget.sliceLogic().GetBackgroundLayer().GetVolumeNode()
+    if volumeNode == backgroundVolumeNode:
         return
-    views = slicer.app.layoutManager().sliceViewNames()
-    for view in views:
-        sliceWidget = slicer.app.layoutManager().sliceWidget(view)
-        sliceCompositeNode = sliceWidget.sliceLogic().GetSliceCompositeNode()
-        if volumeNode is not None:
-            sliceCompositeNode.SetBackgroundVolumeID(volumeNode.GetID())
-            sliceWidget.sliceLogic().FitSliceToAll()
-        else:
-            sliceCompositeNode.SetBackgroundVolumeID(None)
+    slicer.util.setSliceViewerLayers(background = volumeNode.GetID(), fit = True)
 
   def onRestoreSliceViews(self) -> None:
-    # Show last known volume used for segmentation.
-    inputFiducialNode = self.ui.inputFiducialSelector.currentNode()
-    if not inputFiducialNode:
-        return
-    referencedInputVolume = inputFiducialNode.GetNodeReference("InputVolumeNode")
-    self.updateSliceViews(referencedInputVolume)
+    if self._parameterNode and self._parameterNode.inputVolumeNode:
+      self.updateSliceViews()
 
   def cleanup(self) -> None:
     """
@@ -222,148 +221,87 @@ class QuickArterySegmentationWidget(ScriptedLoadableModuleWidget, VTKObservation
     self.removeObservers()
 
   def enter(self) -> None:
-    """
-    Called each time the user opens this module.
-    """
+    """Called each time the user opens this module."""
     # Make sure parameter node exists and observed
-    self.initializeParameterNode()
+    if self._parameterNode:
+      self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
 
   def exit(self) -> None:
-    """
-    Called each time the user opens a different module.
-    """
+    """Called each time the user opens a different module."""
     # Do not react to parameter node changes (GUI will be updated when the user enters into the module)
     if self._parameterNode:
       self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
       self._parameterNodeGuiTag = None
 
   def onSceneStartClose(self, caller, event) -> None:
-    """
-    Called just before the scene is closed.
-    """
-    # Parameter node will be reset, do not use it anymore
-    self.setParameterNode(None)
+    """Called just before the scene is closed."""
 
   def onSceneEndClose(self, caller, event) -> None:
-    """
-    Called just after the scene is closed.
-    """
-    # If this module is shown while the scene is closed then recreate a new parameter node immediately
-    self.logic.initMemberVariables()
-    if self.parent.isEntered:
-      self.initializeParameterNode()
+    """Called just after the scene is closed."""
+    self.parameterSetChanged(None)
 
-  def initializeParameterNode(self) -> None:
-    """
-    Ensure parameter node exists and observed.
-    """
-    # Parameter node stores all user choices in parameter values, node selections, etc.
-    # so that when the scene is saved and reloaded, these settings are restored.
-
-    self.setParameterNode(self.logic.getParameterNode())
-
-  def setParameterNode(self, inputParameterNode) -> None:
+  def setParameterNode(self, inputParameterNode: Optional[QuickArterySegmentationParameterNode]) -> None:
     """
     Set and observe parameter node.
-    Observation is needed because when the parameter node is changed then the GUI must be updated immediately.
+    Observation is needed to prevent a crash when working with multiple parameter sets.
+    It may be removed if core is fixed.
     """
 
     if self._parameterNode:
       self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
+      self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._guardDog)
     self._parameterNode = inputParameterNode
     if self._parameterNode:
       # Note: in the .ui file, a Qt dynamic property called "SlicerParameterName" is set on each
       # ui element that needs connection.
       self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
+      self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._guardDog)
+    self.logic.setParameterNode(self._parameterNode)
+    self.enableWorkSpace()
 
-  """
-  Let each one trace last used parameter values and output nodes.
-  These can be restored when an input fiducial is selected again.
-  """
-  def UpdateInputNodeWithThisOutputNode(self, outputNode, referenceID) -> None:
-    outputNodeID = ""
-    if outputNode:
-        outputNodeID = outputNode.GetID()
-    self._parameterNode.inputFiducialNode.SetNodeReferenceID(referenceID, outputNodeID)
+  def _guardDog(self, caller=None, event=None):
+    pass
 
-  def UpdateInputNodeWithOutputNodes(self) -> None:
-    if not self._parameterNode.inputFiducialNode:
-        return
-    wasModified = self._parameterNode.inputFiducialNode.StartModify()
-    self.UpdateInputNodeWithThisOutputNode(self._parameterNode.outputSegmentationNode, "OutputSegmentation")
-    self.UpdateInputNodeWithThisOutputNode(self._parameterNode.outputCenterlineModelNode, "OutputCenterlineModel")
-    self.UpdateInputNodeWithThisOutputNode(self._parameterNode.outputCenterlineCurveNode, "OutputCenterlineCurve")
-    self._parameterNode.inputFiducialNode.EndModify(wasModified)
+  def parameterSetChanged(self, newParameterSet):
+    # When all nodes are deleted, the wrapper outputs errors and alien nodes appear in the selector.
+    if not newParameterSet:
+      self.setParameterNode(None)
+      return
+    nextParameterNode = QuickArterySegmentationParameterNode(newParameterSet)
+    self.setParameterNode(nextParameterNode)
 
-  def UpdateInputNodeWithParameters(self) -> None:
-    if not self._parameterNode.inputFiducialNode:
-        return
-    wasModified = self._parameterNode.inputFiducialNode.StartModify()
-
-    sliceNode = self._parameterNode.inputSliceNode
-    sliceWidget = slicer.app.layoutManager().sliceWidget(sliceNode.GetName())
-    volumeNode = sliceWidget.sliceLogic().GetBackgroundLayer().GetVolumeNode()
-    self._parameterNode.inputFiducialNode.SetNodeReferenceID("InputVolumeNode", volumeNode.GetID())
-
-    inputROINodeID = self._parameterNode.inputROINode.GetID()
-    self._parameterNode.inputFiducialNode.SetNodeReferenceID("InputROINode", inputROINodeID)
-    self._parameterNode.inputFiducialNode.SetAttribute("InputIntensityTolerance", str(self.ui.intensityToleranceSpinBox.value))
-    self._parameterNode.inputFiducialNode.SetAttribute("NeighbourhoodSize", str(self.ui.neighbourhoodSizeDoubleSpinBox.value))
-    self._parameterNode.inputFiducialNode.EndModify(wasModified)
-
-  # Restore parameters from input fiducial
-  def updateGUIParametersFromInputNode(self, node) -> None:
-    if not node:
-        return
-    self.ui.inputROISelector.setCurrentNode(node.GetNodeReference("InputROINode"))
-    inputIntensityTolerance = node.GetAttribute("InputIntensityTolerance")
-    if inputIntensityTolerance:
-        self.ui.intensityToleranceSpinBox.value = int(inputIntensityTolerance)
-    inputNeighbourhoodSize = node.GetAttribute("NeighbourhoodSize")
-    if inputNeighbourhoodSize:
-        self.ui.neighbourhoodSizeDoubleSpinBox.value = float(inputNeighbourhoodSize)
-
-  # Restore output nodes in logic
-  def UpdateParameterWithOutputNodes(self) -> None:
-    if not self._parameterNode.inputFiducialNode:
-        return
-    # Here we use a segmentation specified in UI, not the one referenced in the input fiducial.
-    self._parameterNode.outputSegmentationNode = self.ui.outputSegmentationSelector.currentNode()
-    self._parameterNode.outputCenterlineModelNode = self._parameterNode.inputFiducialNode.GetNodeReference("OutputCenterlineModel")
-    self._parameterNode.outputCenterlineCurveNode = self._parameterNode.inputFiducialNode.GetNodeReference("OutputCenterlineCurve")
-
-  def onApplyButton(self) -> None:
+  def onApply(self) -> None:
     """
     Run processing when user clicks "Apply" button.
     """
     try:
-        if self._parameterNode.inputFiducialNode is None:
-            self.inform(_("No input fiducial node specified."))
-            return
-        if self._parameterNode.inputSliceNode is None:
-            self.inform(_("No input slice node specified."))
-            return
-        # Ensure there's a background volume node.
-        sliceNode = self._parameterNode.inputSliceNode
-        sliceWidget = slicer.app.layoutManager().sliceWidget(sliceNode.GetName())
-        volumeNode = sliceWidget.sliceLogic().GetBackgroundLayer().GetVolumeNode()
-        if volumeNode is None:
-            self.inform(_("No volume node selected in input slice node."))
-            return
-        # We no longer preprocess input surface in 'Extract centerline', to avoid crashes. Force a ROI to reduce computation time.
-        if self._parameterNode.inputROINode is None:
-            self.inform(_("No input ROI node specified."))
-            return
-        # Restore logic output objects relevant to the input fiducial.
-        self.UpdateParameterWithOutputNodes()
-        # Compute output
-        self.logic.process()
-        # Update input node with references to new output nodes.
-        self.UpdateInputNodeWithOutputNodes()
-        # Update input node with input parameters.
-        self.UpdateInputNodeWithParameters()
-        # Update segmentation selector if it was none
-        self.ui.outputSegmentationSelector.setCurrentNode(self._parameterNode.outputSegmentationNode)
+      if not self.ui.parameterSetSelector.currentNode():
+        self.inform((_("No parameter set defined.")))
+        return
+      if self._parameterNode.inputFiducialNode is None:
+        self.inform(_("No input fiducial node specified."))
+        return
+      if self._parameterNode.inputSliceNode is None:
+        self.inform(_("No input slice node specified."))
+        return
+      # Ensure there's a background volume node.
+      sliceNode = self._parameterNode.inputSliceNode
+      sliceWidget = slicer.app.layoutManager().sliceWidget(sliceNode.GetName())
+      volumeNode = sliceWidget.sliceLogic().GetBackgroundLayer().GetVolumeNode()
+      if volumeNode is None:
+        self.inform(_("No volume node selected in input slice node."))
+        return
+      self._parameterNode.inputVolumeNode = volumeNode
+      # Force a ROI to reduce computation time.
+      if self._parameterNode.inputROINode is None:
+        self.inform(_("No input ROI node specified."))
+        return
+
+      # Compute output
+      self.logic.process()
+
+      # Update segmentation selector if it was none.
+      self.ui.outputSegmentationSelector.setCurrentNode(self._parameterNode.outputSegmentationNode)
 
     except Exception as e:
         slicer.util.errorDisplay(_("Failed to compute results: ") + str(e))
@@ -372,11 +310,10 @@ class QuickArterySegmentationWidget(ScriptedLoadableModuleWidget, VTKObservation
 
   # Handy during development
   def removeOutputNodes(self) -> None:
-    inputFiducialNode = self.ui.inputFiducialSelector.currentNode()
-    if not inputFiducialNode:
+    if not self._parameterNode:
         return
     # Remove segment, ID is controlled.
-    segmentID = "Segment_" + inputFiducialNode.GetID()
+    segmentID = "Segment_" + self._parameterNode.inputFiducialNode.GetID()
     segmentation = self._parameterNode.outputSegmentationNode
     segment = segmentation.GetSegmentation().GetSegment(segmentID)
     if segment:
@@ -390,12 +327,20 @@ class QuickArterySegmentationWidget(ScriptedLoadableModuleWidget, VTKObservation
             outputCurveChild = shNode.GetItemDataNode(outputCurveChildId)
             slicer.mrmlScene.RemoveNode(outputCurveChild)
 
+    slicer.mrmlScene.RemoveNode(self._parameterNode.outputFiducialNode)
     slicer.mrmlScene.RemoveNode(self._parameterNode.outputCenterlineModelNode)
     slicer.mrmlScene.RemoveNode(self._parameterNode.outputCenterlineCurveNode)
+    self._parameterNode.outputFiducialNode = None
     self._parameterNode.outputCenterlineModelNode = None
     self._parameterNode.outputCenterlineCurveNode = None
-    # Remove node references to centerlines
-    self.UpdateInputNodeWithOutputNodes()
+
+  # Selecting a parameter set is an entry point.
+  def enableWorkSpace(self):
+    enabled = (self._parameterNode is not None)
+    for widget in self.workSpaceWidgets:
+      widget.setEnabled(enabled)
+
+
 #
 # QuickArterySegmentationLogic
 #
@@ -415,13 +360,23 @@ class QuickArterySegmentationLogic(ScriptedLoadableModuleLogic):
     Called when the logic class is instantiated. Can be used for initializing member variables.
     """
     ScriptedLoadableModuleLogic.__init__(self)
-    self.initMemberVariables()
+    self._parameterNode = None
+
+  def setParameterNode(self, parameterNode):
+    self._parameterNode = parameterNode
 
   def getParameterNode(self):
     return self._parameterNode
 
-  def initMemberVariables(self) -> None:
-    self._parameterNode = QuickArterySegmentationParameterNode(super().getParameterNode())
+  # This is a facility for scripting.
+  def generateParameterNode(self, scriptedModule: slicer.vtkMRMLScriptedModuleNode = None):
+    if not scriptedModule:
+      superScriptedModule = super().getParameterNode()
+      # This one must not appear in the parameter set selector.
+      superScriptedModule.SetAttribute("ModuleName", "Scripted" + self.moduleName)
+      return QuickArterySegmentationParameterNode(superScriptedModule)
+    else:
+      return QuickArterySegmentationParameterNode(scriptedModule)
 
   def showStatusMessage(self, messages) -> None:
     separator = " "
@@ -439,11 +394,10 @@ class QuickArterySegmentationLogic(ScriptedLoadableModuleLogic):
 
     # Create a new segmentation if none is specified.
     if not self._parameterNode.outputSegmentationNode:
-        segmentation=slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
-        self._parameterNode.outputSegmentationNode = segmentation
+      segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+      self._parameterNode.outputSegmentationNode = segmentation
     else:
-        # Prefer a local reference for readability
-        segmentation = self._parameterNode.outputSegmentationNode
+      segmentation = self._parameterNode.outputSegmentationNode
 
     # Create segment editor object if needed.
     segmentEditorModuleWidget = slicer.util.getModuleWidget("SegmentEditor")
@@ -469,17 +423,12 @@ class QuickArterySegmentationLogic(ScriptedLoadableModuleLogic):
     segmentID = "Segment_" + self._parameterNode.inputFiducialNode.GetID()
     segment = segmentation.GetSegmentation().GetSegment(segmentID)
     if segment:
-        segmentColor = segment.GetColor()
-        segmentation.GetSegmentation().RemoveSegment(segment)
+      segmentColor = segment.GetColor()
+      segmentation.GetSegmentation().RemoveSegment(segment)
 
     # Add a new segment, with controlled ID and known color.
     object = segmentation.GetSegmentation().AddEmptySegment(segmentID)
     segment = segmentation.GetSegmentation().GetSegment(object)
-    # Visually identify the segment by the input fiducial name
-    segmentName = "Segment_" + self._parameterNode.inputFiducialNode.GetName()
-    segment.SetName(segmentName)
-    if len(segmentColor):
-        segment.SetColor(segmentColor)
     # Select new segment
     seWidget.setCurrentSegmentID(segmentID)
 
@@ -502,27 +451,27 @@ class QuickArterySegmentationLogic(ScriptedLoadableModuleLogic):
     self._parameterNode.inputFiducialNode.GetControlPointPositionsWorld(points)
     numberOfFiducialControlPoints = points.GetNumberOfPoints()
     for i in range(numberOfFiducialControlPoints):
-        # Show progress in status bar. Helpful to wait.
-        t = time.time()
-        durationValue = '%.2f' % (t-startTime)
-        msg = _("Flood filling: {duration} seconds - ").format(duration = durationValue)
-        self.showStatusMessage((msg, str(i + 1), "/", str(numberOfFiducialControlPoints)))
+      # Show progress in status bar. Helpful to wait.
+      t = time.time()
+      durationValue = '%.2f' % (t-startTime)
+      msg = _("Flood filling: {duration} seconds - ").format(duration = durationValue)
+      self.showStatusMessage((msg, str(i + 1), "/", str(numberOfFiducialControlPoints)))
 
-        rasPoint = points.GetPoint(i)
-        slicer.vtkMRMLSliceNode.JumpSlice(sliceWidget.sliceLogic().GetSliceNode(), *rasPoint)
-        point3D = qt.QVector3D(rasPoint[0], rasPoint[1], rasPoint[2])
-        point2D = ffEffect.rasToXy(point3D, sliceWidget)
-        qIjkPoint = ffEffect.xyToIjk(point2D, sliceWidget, ffEffect.self().getClippedSourceImageData())
-        ffEffect.self().floodFillFromPoint((int(qIjkPoint.x()), int(qIjkPoint.y()), int(qIjkPoint.z())))
+      rasPoint = points.GetPoint(i)
+      slicer.vtkMRMLSliceNode.JumpSlice(sliceWidget.sliceLogic().GetSliceNode(), *rasPoint)
+      point3D = qt.QVector3D(rasPoint[0], rasPoint[1], rasPoint[2])
+      point2D = ffEffect.rasToXy(point3D, sliceWidget)
+      qIjkPoint = ffEffect.xyToIjk(point2D, sliceWidget, ffEffect.self().getClippedSourceImageData())
+      ffEffect.self().floodFillFromPoint((int(qIjkPoint.x()), int(qIjkPoint.y()), int(qIjkPoint.z())))
 
     # Switch off active effect
     seWidget.setActiveEffect(None)
     # Show segment. Poked from qMRMLSegmentationShow3DButton.cxx
     if segmentation.GetSegmentation().CreateRepresentation(slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName()):
-        segmentation.GetDisplayNode().SetPreferredDisplayRepresentationName3D(slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName())
+      segmentation.GetDisplayNode().SetPreferredDisplayRepresentationName3D(slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName())
     # Hide ROI
     if self._parameterNode.inputROINode:
-        self._parameterNode.inputROINode.SetDisplayVisibility(False)
+      self._parameterNode.inputROINode.SetDisplayVisibility(False)
 
     if not self._parameterNode.optionExtractCenterlines:
         stopTime = time.time()
@@ -554,21 +503,14 @@ class QuickArterySegmentationLogic(ScriptedLoadableModuleLogic):
 
     # Output centerline model. A single node throughout.
     if not self._parameterNode.outputCenterlineModelNode:
-        self._parameterNode.outputCenterlineModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode")
-        # Visually identify the segment by the input fiducial name
-        self._parameterNode.outputCenterlineModelNode.SetName("Centerline_model_" + self._parameterNode.inputFiducialNode.GetName())
-    # Account for rename
-    self._parameterNode.outputCenterlineModelNode.SetName("Centerline_model_" + self._parameterNode.inputFiducialNode.GetName())
+      # Use the basename of the selector.
+      self._parameterNode.outputCenterlineModelNode = outputCenterlineModelSelector.addNode("vtkMRMLModelNode")
     outputCenterlineModelSelector.setCurrentNode(self._parameterNode.outputCenterlineModelNode)
 
     # Output centerline curve. A single node throughout.
     centerlineCurve = self._parameterNode.outputCenterlineCurveNode
     if not self._parameterNode.outputCenterlineCurveNode:
-        self._parameterNode.outputCenterlineCurveNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsCurveNode")
-        # Visually identify the segment by the input fiducial name
-        self._parameterNode.outputCenterlineCurveNode.SetName("Centerline_curve_" + self._parameterNode.inputFiducialNode.GetName())
-    # Account for rename
-    self._parameterNode.outputCenterlineCurveNode.SetName("Centerline_curve_" + self._parameterNode.inputFiducialNode.GetName())
+      self._parameterNode.outputCenterlineCurveNode = outputCenterlineCurveSelector.addNode("vtkMRMLMarkupsCurveNode")
     outputCenterlineCurveSelector.setCurrentNode(self._parameterNode.outputCenterlineCurveNode)
 
     """
