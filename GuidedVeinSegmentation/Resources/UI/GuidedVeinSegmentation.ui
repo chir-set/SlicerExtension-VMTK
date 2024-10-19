@@ -12,128 +12,180 @@
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
-    <layout class="QFormLayout" name="formLayout">
-     <item row="1" column="0">
-      <widget class="QLabel" name="curveLabel">
+    <layout class="QFormLayout" name="parameterSetLayout">
+     <item row="0" column="0">
+      <widget class="QLabel" name="parameterSetLabel">
        <property name="text">
-        <string>Open curve:</string>
+        <string>Parameter set:</string>
        </property>
       </widget>
      </item>
-     <item row="1" column="1">
-      <widget class="qMRMLNodeComboBox" name="curveSelector">
+     <item row="0" column="1">
+      <widget class="qMRMLNodeComboBox" name="parameterSetSelector">
+       <property name="enabled">
+        <bool>false</bool>
+       </property>
        <property name="toolTip">
-        <string>Select an open markups curve.</string>
+        <string>A parameter set groups parameters that define a named study distinctly.</string>
        </property>
        <property name="nodeTypes">
         <stringlist notr="true">
-         <string>vtkMRMLMarkupsCurveNode</string>
+         <string>vtkMRMLScriptedModuleNode</string>
         </stringlist>
        </property>
-       <property name="showChildNodeTypes">
-        <bool>false</bool>
+       <property name="showHidden">
+        <bool>true</bool>
+       </property>
+       <property name="hideChildNodeTypes">
+        <stringlist notr="true"/>
+       </property>
+       <property name="baseName">
+        <string notr="true">GuidedVeinSegmentation</string>
        </property>
        <property name="noneEnabled">
-        <bool>true</bool>
-       </property>
-       <property name="addEnabled">
         <bool>false</bool>
-       </property>
-       <property name="removeEnabled">
-        <bool>true</bool>
-       </property>
-       <property name="editEnabled">
-        <bool>true</bool>
        </property>
        <property name="renameEnabled">
         <bool>true</bool>
        </property>
-       <property name="SlicerParameterName" stdset="0">
-        <string notr="true">inputCurve</string>
+       <property name="interactionNodeSingletonTag">
+        <string notr="true"/>
        </property>
-      </widget>
-     </item>
-     <item row="2" column="0">
-      <widget class="QLabel" name="volumeLabel">
-       <property name="text">
-        <string>Volume:</string>
-       </property>
-      </widget>
-     </item>
-     <item row="2" column="1">
-      <widget class="qMRMLNodeComboBox" name="volumeSelector">
-       <property name="toolTip">
-        <string>Select a volume.</string>
-       </property>
-       <property name="nodeTypes">
-        <stringlist notr="true">
-         <string>vtkMRMLScalarVolumeNode</string>
-        </stringlist>
-       </property>
-       <property name="showChildNodeTypes">
-        <bool>false</bool>
-       </property>
-       <property name="noneEnabled">
+       <property name="selectNodeUponCreation">
         <bool>true</bool>
-       </property>
-       <property name="addEnabled">
-        <bool>false</bool>
-       </property>
-       <property name="removeEnabled">
-        <bool>true</bool>
-       </property>
-       <property name="editEnabled">
-        <bool>true</bool>
-       </property>
-       <property name="renameEnabled">
-        <bool>true</bool>
-       </property>
-       <property name="SlicerParameterName" stdset="0">
-        <string notr="true">inputVolume</string>
-       </property>
-      </widget>
-     </item>
-     <item row="3" column="1">
-      <widget class="qMRMLNodeComboBox" name="segmentationSelector">
-       <property name="toolTip">
-        <string>Select a segmentation to contain the output.</string>
-       </property>
-       <property name="nodeTypes">
-        <stringlist notr="true">
-         <string>vtkMRMLSegmentationNode</string>
-        </stringlist>
-       </property>
-       <property name="showChildNodeTypes">
-        <bool>false</bool>
-       </property>
-       <property name="noneEnabled">
-        <bool>true</bool>
-       </property>
-       <property name="addEnabled">
-        <bool>true</bool>
-       </property>
-       <property name="removeEnabled">
-        <bool>true</bool>
-       </property>
-       <property name="editEnabled">
-        <bool>true</bool>
-       </property>
-       <property name="renameEnabled">
-        <bool>true</bool>
-       </property>
-       <property name="SlicerParameterName" stdset="0">
-        <string notr="true">inputSegmentation</string>
-       </property>
-      </widget>
-     </item>
-     <item row="3" column="0">
-      <widget class="QLabel" name="segmentationLabel">
-       <property name="text">
-        <string>Segmentation:</string>
        </property>
       </widget>
      </item>
     </layout>
+   </item>
+   <item>
+    <widget class="ctkCollapsibleButton" name="inputCollapsibleButton">
+     <property name="text">
+      <string>Inputs</string>
+     </property>
+     <layout class="QFormLayout" name="formLayout_2">
+      <item row="0" column="0">
+       <widget class="QLabel" name="curveLabel">
+        <property name="text">
+         <string>Open curve:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="qMRMLNodeComboBox" name="curveSelector">
+        <property name="toolTip">
+         <string>Select an open markups curve.</string>
+        </property>
+        <property name="nodeTypes">
+         <stringlist notr="true">
+          <string>vtkMRMLMarkupsCurveNode</string>
+         </stringlist>
+        </property>
+        <property name="showChildNodeTypes">
+         <bool>false</bool>
+        </property>
+        <property name="noneEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="addEnabled">
+         <bool>false</bool>
+        </property>
+        <property name="removeEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="editEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="renameEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string notr="true">inputCurve</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="volumeLabel">
+        <property name="text">
+         <string>Volume:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="qMRMLNodeComboBox" name="volumeSelector">
+        <property name="toolTip">
+         <string>Select a volume.</string>
+        </property>
+        <property name="nodeTypes">
+         <stringlist notr="true">
+          <string>vtkMRMLScalarVolumeNode</string>
+         </stringlist>
+        </property>
+        <property name="showChildNodeTypes">
+         <bool>false</bool>
+        </property>
+        <property name="noneEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="addEnabled">
+         <bool>false</bool>
+        </property>
+        <property name="removeEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="editEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="renameEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string notr="true">inputVolume</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="segmentationLabel">
+        <property name="text">
+         <string>Segmentation:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="qMRMLNodeComboBox" name="segmentationSelector">
+        <property name="toolTip">
+         <string>Select a segmentation to contain the output.</string>
+        </property>
+        <property name="nodeTypes">
+         <stringlist notr="true">
+          <string>vtkMRMLSegmentationNode</string>
+         </stringlist>
+        </property>
+        <property name="showChildNodeTypes">
+         <bool>false</bool>
+        </property>
+        <property name="noneEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="addEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="removeEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="editEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="renameEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string notr="true">inputSegmentation</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
    </item>
    <item>
     <spacer name="verticalSpacer">
@@ -430,6 +482,22 @@ deviation:</string>
  </customwidgets>
  <resources/>
  <connections>
+  <connection>
+   <sender>GuidedVeinSegmentation</sender>
+   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+   <receiver>parameterSetSelector</receiver>
+   <slot>setMRMLScene(vtkMRMLScene*)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>190</x>
+     <y>328</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>235</x>
+     <y>22</y>
+    </hint>
+   </hints>
+  </connection>
   <connection>
    <sender>GuidedVeinSegmentation</sender>
    <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>

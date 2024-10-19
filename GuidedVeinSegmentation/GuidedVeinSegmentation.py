@@ -5,8 +5,8 @@ from typing import Annotated, Optional
 import vtk
 
 import slicer
-import slicer
 from slicer.i18n import tr as _
+from slicer.i18n import translate
 from slicer.ScriptedLoadableModule import *
 from slicer.util import VTKObservationMixin
 from slicer.parameterNodeWrapper import (
@@ -15,7 +15,8 @@ from slicer.parameterNodeWrapper import (
 )
 
 from slicer import vtkMRMLScalarVolumeNode
-
+from slicer import vtkMRMLMarkupsCurveNode
+from slicer import vtkMRMLSegmentationNode
 
 #
 # GuidedVeinSegmentation
@@ -46,15 +47,6 @@ and Steve Pieper, Isomics, Inc. and was partially funded by NIH grant 3P41RR0132
 
 @parameterNodeWrapper
 class GuidedVeinSegmentationParameterNode:
-    """
-    The parameters needed by module.
-
-    inputVolume - The volume to threshold.
-    imageThreshold - The value at which to threshold the input volume.
-    invertThreshold - If true, will invert the threshold.
-    thresholdedVolume - The output volume that will contain the thresholded volume.
-    invertedVolume - The output volume that will contain the inverted thresholded volume.
-    """
     inputCurve: slicer.vtkMRMLMarkupsCurveNode
     inputVolume: slicer.vtkMRMLScalarVolumeNode
     inputSegmentation: slicer.vtkMRMLSegmentationNode
@@ -96,6 +88,10 @@ class GuidedVeinSegmentationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.layout.addWidget(uiWidget)
         self.ui = slicer.util.childWidgetVariables(uiWidget)
 
+        self.workSpaceWidgets = [self.ui.inputCollapsibleButton,
+                        self.ui.parameterCollapsibleButton,
+                        self.ui.applyButton]
+
         # Set scene in MRML widgets. Make sure that in Qt designer the top-level qMRMLWidget's
         # "mrmlSceneChanged(vtkMRMLScene*)" signal in is connected to each MRML widget's.
         # "setMRMLScene(vtkMRMLScene*)" slot.
@@ -107,8 +103,11 @@ class GuidedVeinSegmentationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         # Create logic class. Logic implements all computations that should be possible to run
         # in batch mode, without a graphical user interface.
         self.logic = GuidedVeinSegmentationLogic()
+        self.ui.parameterSetSelector.addAttribute("vtkMRMLScriptedModuleNode", "ModuleName", self.moduleName)
 
         # Connections
+        self.ui.parameterSetSelector.connect('currentNodeChanged(vtkMRMLNode*)', self.parameterSetChanged)
+        self.ui.parameterSetSelector.connect('currentNodeChanged(vtkMRMLNode*)', self.updateSliceViews)
 
         # These connections ensure that we update parameter node when scene is closed
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
@@ -117,8 +116,14 @@ class GuidedVeinSegmentationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         # Buttons
         self.ui.applyButton.connect('clicked(bool)', self.onApply)
 
-        # Make sure parameter node is initialized (needed for module reload)
-        self.initializeParameterNode()
+        # Let the parameter set be None; a study can thus be selected from a loaded saved scene.
+        if self.ui.parameterSetSelector.nodeCount():
+            wasBlocked = self.ui.parameterSetSelector.blockSignals(True)
+            self.ui.parameterSetSelector.setCurrentNode(None)
+            self.ui.parameterSetSelector.blockSignals(wasBlocked)
+
+        # A parameter set must be selected to use the module.
+        self.enableWorkSpace()
 
     def cleanup(self) -> None:
         """
@@ -127,66 +132,46 @@ class GuidedVeinSegmentationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.removeObservers()
 
     def enter(self) -> None:
-        """
-        Called each time the user opens this module.
-        """
+        """Called each time the user opens this module."""
         # Make sure parameter node exists and observed
-        self.initializeParameterNode()
+        if self._parameterNode:
+            self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
 
     def exit(self) -> None:
-        """
-        Called each time the user opens a different module.
-        """
+        """Called each time the user opens a different module."""
         # Do not react to parameter node changes (GUI will be updated when the user enters into the module)
         if self._parameterNode:
             self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
             self._parameterNodeGuiTag = None
 
     def onSceneStartClose(self, caller, event) -> None:
-        """
-        Called just before the scene is closed.
-        """
-        # Parameter node will be reset, do not use it anymore
-        self.setParameterNode(None)
+        """Called just before the scene is closed."""
 
     def onSceneEndClose(self, caller, event) -> None:
-        """
-        Called just after the scene is closed.
-        """
-        # If this module is shown while the scene is closed then recreate a new parameter node immediately
-        if self.parent.isEntered:
-            self.initializeParameterNode()
-
-    def initializeParameterNode(self) -> None:
-        """
-        Ensure parameter node exists and observed.
-        """
-        # Parameter node stores all user choices in parameter values, node selections, etc.
-        # so that when the scene is saved and reloaded, these settings are restored.
-
-        self.setParameterNode(self.logic.getParameterNode())
-
-        """
-        # Select default input nodes if nothing is selected yet to save a few clicks for the user
-        if not self._parameterNode.inputVolume:
-            firstVolumeNode = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLScalarVolumeNode")
-            if firstVolumeNode:
-                self._parameterNode.inputVolume = firstVolumeNode
-        """
+        """Called just after the scene is closed."""
+        self.parameterSetChanged(None)
 
     def setParameterNode(self, inputParameterNode: Optional[GuidedVeinSegmentationParameterNode]) -> None:
         """
         Set and observe parameter node.
-        Observation is needed because when the parameter node is changed then the GUI must be updated immediately.
+        Observation is needed to prevent a crash when working with multiple parameter sets.
+        It may be removed if core is fixed.
         """
 
         if self._parameterNode:
             self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
+            self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._guardDog)
         self._parameterNode = inputParameterNode
         if self._parameterNode:
             # Note: in the .ui file, a Qt dynamic property called "SlicerParameterName" is set on each
             # ui element that needs connection.
             self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
+            self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._guardDog)
+        self.logic.setParameterNode(self._parameterNode)
+        self.enableWorkSpace()
+
+    def _guardDog(self, caller=None, event=None):
+        pass
 
     def parameterSetChanged(self, newParameterSet):
         # When all nodes are deleted, the wrapper outputs errors and alien nodes appear in the selector.
@@ -207,17 +192,19 @@ class GuidedVeinSegmentationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         Run processing when user clicks "Apply" button.
         """
         with slicer.util.tryWithErrorDisplay(_("Failed to compute results."), waitCursor=True):
+            if not self.ui.parameterSetSelector.currentNode():
+                slicer.util.showStatusMessage(_("No parameter set defined."), 3000)
+                logging.error("No parameter set defined.")
+                return
 
             # Compute output
-            self.logic.process(self._parameterNode.inputCurve,
-                               self._parameterNode.inputVolume,
-                               self._parameterNode.inputSegmentation,
-                               self._parameterNode.extrusionKernelSize,
-                               self._parameterNode.gaussianStandardDeviation,
-                               self._parameterNode.seedRadius,
-                               self._parameterNode.shellMargin,
-                               self._parameterNode.shellThickness,
-                               self._parameterNode.subtractOtherSegments)
+            self.logic.process()
+
+    # Selecting a parameter set is an entry point.
+    def enableWorkSpace(self):
+        enabled = (self._parameterNode is not None)
+        for widget in self.workSpaceWidgets:
+            widget.setEnabled(enabled)
 
 #
 # GuidedVeinSegmentationLogic
@@ -238,20 +225,34 @@ class GuidedVeinSegmentationLogic(ScriptedLoadableModuleLogic):
         Called when the logic class is instantiated. Can be used for initializing member variables.
         """
         ScriptedLoadableModuleLogic.__init__(self)
+        self._parameterNode = None
+
+    def setParameterNode(self, parameterNode):
+        self._parameterNode = parameterNode
 
     def getParameterNode(self):
-        return GuidedVeinSegmentationParameterNode(super().getParameterNode())
+        return self._parameterNode
 
-    def process(self,
-                inputCurve: slicer.vtkMRMLMarkupsCurveNode,
-                inputVolume: slicer.vtkMRMLScalarVolumeNode,
-                inputSegmentation: slicer.vtkMRMLSegmentationNode,
-                extrusionKernelSize: float = 5.0,
-                gaussianStandardDeviation: float = 2.0,
-                seedRadius: float = 1.0,
-                shellMargin: float = 18.0,
-                shellThickness: float = 2.0,
-                subtractOtherSegments: bool = True) -> None:
+    # This is a facility for scripting.
+    def generateParameterNode(self, scriptedModule: slicer.vtkMRMLScriptedModuleNode = None):
+        if not scriptedModule:
+            superScriptedModule = super().getParameterNode()
+            # This one must not appear in the parameter set selector.
+            superScriptedModule.SetAttribute("ModuleName", "Scripted" + self.moduleName)
+            return GuidedVeinSegmentationParameterNode(superScriptedModule)
+        else:
+            return GuidedVeinSegmentationParameterNode(scriptedModule)
+
+    def process(self) -> None:
+        inputCurve = self._parameterNode.inputCurve
+        inputVolume = self._parameterNode.inputVolume
+        inputSegmentation = self._parameterNode.inputSegmentation
+        extrusionKernelSize = self._parameterNode.extrusionKernelSize
+        gaussianStandardDeviation = self._parameterNode.gaussianStandardDeviation
+        seedRadius = self._parameterNode.seedRadius
+        shellMargin = self._parameterNode.shellMargin
+        shellThickness = self._parameterNode.shellThickness
+        subtractOtherSegments = self._parameterNode.subtractOtherSegments
 
         if not inputCurve or not inputVolume or not inputSegmentation:
             raise ValueError(_("Input curve or volume or segmentation is invalid."))
