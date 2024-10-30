@@ -15,6 +15,9 @@ from slicer.parameterNodeWrapper import (
 )
 
 from slicer import vtkMRMLScalarVolumeNode
+from slicer import vtkMRMLMarkupsFiducialNode
+from slicer import vtkMRMLSegmentationNode
+from slicer import vtkMRMLTableNode
 
 #
 # StenosisMeasurement2D
@@ -47,6 +50,12 @@ and Steve Pieper, Isomics, Inc. and was partially funded by NIH grant 3P41RR0132
 class StenosisMeasurement2DParameterNode:
     inputSliceNode: slicer.vtkMRMLSliceNode
     inputFiducialNode: slicer.vtkMRMLMarkupsFiducialNode
+    
+    inputVolume: slicer.vtkMRMLScalarVolumeNode
+    dataTableNode: slicer.vtkMRMLTableNode
+    currentControlPointID:str = "-1"
+    inputSegmentation: slicer.vtkMRMLSegmentationNode
+    inputSegmentID: str = ""
 
 
 class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
@@ -89,6 +98,10 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
     uiWidget = slicer.util.loadUI(self.resourcePath('UI/StenosisMeasurement2D.ui'))
     self.layout.addWidget(uiWidget)
     self.ui = slicer.util.childWidgetVariables(uiWidget)
+    
+    self.workSpaceWidgets = [self.ui.inputsCollapsibleButton,
+                        self.ui.presentationTableWidget,
+                        self.ui.applyButton]
 
     # Set scene in MRML widgets. Make sure that in Qt designer the top-level qMRMLWidget's
     # "mrmlSceneChanged(vtkMRMLScene*)" signal in is connected to each MRML widget's.
@@ -98,18 +111,18 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
     # Create logic class. Logic implements all computations that should be possible to run
     # in batch mode, without a graphical user interface.
     self.logic = StenosisMeasurement2DLogic()
+    self.ui.parameterSetSelector.addAttribute("vtkMRMLScriptedModuleNode", "ModuleName", self.moduleName)
 
     # Connections
+    self.ui.parameterSetSelector.connect('currentNodeChanged(vtkMRMLNode*)', self.parameterSetChanged)
+    self.ui.parameterSetSelector.connect('currentNodeChanged(vtkMRMLNode*)', self.updateSliceViews)
 
     # These connections ensure that we update parameter node when scene is closed
     self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
     self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
 
     # Buttons
-    self.ui.applyButton.connect('clicked(bool)', self.onApplyButton)
-
-    # Make sure parameter node is initialized (needed for module reload)
-    self.initializeParameterNode()
+    self.ui.applyButton.connect('clicked(bool)', self.onApply)
 
     # Options menu
     self._optionsMainMenu = self.ui.applyButton.menu()
@@ -140,26 +153,37 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
     # Application connections
     self.ui.inputFiducialSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.observeFiducialNode)
     self._restoreSliceViewsOrientation.connect("triggered()", self.restoreAllViews)
+    self.ui.inputSegmentSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSegmentationChanged)
+    self.ui.inputSegmentSelector.connect("currentSegmentChanged(QString)", self.onSegmentChanged)
 
     # Prepare table
-    outputTable = self.ui.outputTableWidget
-    outputTable.setColumnCount(5)
+    presentationTable = self.ui.presentationTableWidget
+    presentationTable.setColumnCount(5)
     columnLabels = (_("Control point"), _("Segment"), _("Surface area"), _("Model visibility"), _("Segment visibility"))
-    outputTable.setHorizontalHeaderLabels(columnLabels)
+    presentationTable.setHorizontalHeaderLabels(columnLabels)
     """
     We need a currentRow() when we toggle the visibility of an output model.
     The row is selected in a lambda function.
     But we don't need to select the whole row visually.
     """
-    outputTable.setSelectionMode(qt.QAbstractItemView.SelectItems)
+    presentationTable.setSelectionMode(qt.QAbstractItemView.SelectItems)
     """
     Table context menu.
     Using self.parent as the menu's parent allows the menu items to lay in the
     foreground.
     """
-    outputTable.setContextMenuPolicy(qt.Qt.CustomContextMenu)
-    outputTable.connect("customContextMenuRequested(QPoint)", self.showTableMenu)
-    outputTable.connect("currentCellChanged(int, int, int, int)", self.onCurrentRowChanged)
+    presentationTable.setContextMenuPolicy(qt.Qt.CustomContextMenu)
+    presentationTable.connect("customContextMenuRequested(QPoint)", self.showTableMenu)
+    presentationTable.connect("currentCellChanged(int, int, int, int)", self.onCurrentRowChanged)
+
+    # Let the parameter set be None; a study can thus be selected from a loaded saved scene.
+    if self.ui.parameterSetSelector.nodeCount():
+      wasBlocked = self.ui.parameterSetSelector.blockSignals(True)
+      self.ui.parameterSetSelector.setCurrentNode(None)
+      self.ui.parameterSetSelector.blockSignals(wasBlocked)
+    
+    # A parameter set must be selected to use the module.
+    self.enableWorkSpace()
 
   def showTableMenu(self, qpoint) -> None:
     # Start from zero.
@@ -191,39 +215,46 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
     In developer mode, the height of the additional collapsible button is not
     taken into account, and influences the menu position.
     """
-    outputTableWidget = self.ui.outputTableWidget
+    presentationTable = self.ui.presentationTableWidget
     menuPosition = qt.QPoint()
-    menuPosition.setX(qpoint.x() + outputTableWidget.x)
-    menuPosition.setY(qpoint.y() + outputTableWidget.y)
+    menuPosition.setX(qpoint.x() + presentationTable.x)
+    menuPosition.setY(qpoint.y() + presentationTable.y)
     self.tableMenu.popup(menuPosition)
 
   def onTableMenuItem(self) -> None:
     action = self.tableMenu.activeAction()
     data = action.data()
-    outputTable = self.ui.outputTableWidget
+    presentationTable = self.ui.presentationTableWidget
     # Remove the current row.
     if data == OUTPUT_TABLE_MENU_REMOVE_ROW:
-        self.removeTableRow(outputTable.currentRow())
+      currentRow = presentationTable.currentRow()
+      self.removeTableRow(currentRow)
+      if self._parameterNode:
+        self._parameterNode.dataTableNode.GetTable().RemoveRow(currentRow)
+        self._parameterNode.dataTableNode.Modified()
     # Remove all rows.
     elif data == OUTPUT_TABLE_MENU_EMPTY_TABLE:
-        while (outputTable.rowCount):
-            self.removeTableRow(0)
+      while (presentationTable.rowCount):
+        self.removeTableRow(0)
+      if self._parameterNode:
+        self._parameterNode.dataTableNode.GetTable().RemoveAllRows()
+        self._parameterNode.dataTableNode.Modified()
     self.tableMenu.hide()
 
   # Remove a single table row and an associated model.
   def removeTableRow(self, rowIndex) -> None:
-    outputTable = self.ui.outputTableWidget
-    fiducialCellItem = outputTable.item(rowIndex, 0)
+    presentationTable = self.ui.presentationTableWidget
+    fiducialCellItem = presentationTable.item(rowIndex, 0)
     if fiducialCellItem:
         cutModel = fiducialCellItem.data(qt.Qt.UserRole)
         if cutModel:
             slicer.mrmlScene.RemoveNode(cutModel)
-    outputTable.removeRow(rowIndex)
+    presentationTable.removeRow(rowIndex)
 
   # Show or hide the output model.
   def onShowModelCheckBox(self, checkStatus) -> None:
-    outputTable = self.ui.outputTableWidget
-    fiducialCellItem = outputTable.item(outputTable.currentRow(), 0)
+    presentationTable = self.ui.presentationTableWidget
+    fiducialCellItem = presentationTable.item(presentationTable.currentRow(), 0)
     if fiducialCellItem:
         cutModel = fiducialCellItem.data(qt.Qt.UserRole)
         if cutModel:
@@ -235,8 +266,8 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
     if not segmentation:
         self.showStatusMessage((_("Input segmentation is invalid"),), True)
         return
-    outputTable = self.ui.outputTableWidget
-    segmentCellItem = outputTable.item(outputTable.currentRow(), 1)
+    presentationTable = self.ui.presentationTableWidget
+    segmentCellItem = presentationTable.item(presentationTable.currentRow(), 1)
     if segmentCellItem:
         segmentID = segmentCellItem.data(qt.Qt.UserRole)
         if (segmentID):
@@ -248,74 +279,109 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
     """
     self.removeObservers()
     # Remove our observations.
-    if self._parameterNode.inputFiducialNode and self.fiducialDisplayNodeObservation:
-        self._parameterNode.inputFiducialNode.RemoveObserver(self.fiducialDisplayNodeObservation)
+    self.observeFiducialNode(None)
 
   def enter(self) -> None:
-    """
-    Called each time the user opens this module.
-    """
+    """Called each time the user opens this module."""
     # Make sure parameter node exists and observed
-    self.initializeParameterNode()
-    # Observe input fiducial.
-    if self._parameterNode.inputFiducialNode:
+    if self._parameterNode:
+      self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
+      # Observe input fiducial.
+      if self._parameterNode.inputFiducialNode:
         self.observeFiducialNode(self._parameterNode.inputFiducialNode)
 
   def exit(self) -> None:
-    """
-    Called each time the user opens a different module.
-    """
+    """Called each time the user opens a different module."""
     # Do not react to parameter node changes (GUI will be updated when the user enters into the module)
     if self._parameterNode:
-        self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
-        self._parameterNodeGuiTag = None
-
-    # Unobserve input fiducial.
-    if self._parameterNode.inputFiducialNode and self.fiducialDisplayNodeObservation:
-        self._parameterNode.inputFiducialNode.RemoveObserver(self.fiducialDisplayNodeObservation)
-
+      self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
+      self._parameterNodeGuiTag = None
+      # Stop input fiducial observation.
+      self.observeFiducialNode(None)
+      
   def onSceneStartClose(self, caller, event) -> None:
-    """
-    Called just before the scene is closed.
-    """
-    # Parameter node will be reset, do not use it anymore
-    self.setParameterNode(None)
-    # Unobserve input fiducial.
-    if self._parameterNode.inputFiducialNode and self.fiducialDisplayNodeObservation:
-        self._parameterNode.inputFiducialNode.RemoveObserver(self.fiducialDisplayNodeObservation)
+    """Called just before the scene is closed."""
+    # Remove a fiducial observation.
+    while (self.ui.presentationTableWidget.rowCount):
+      self.removeTableRow(0)
+    self.observeFiducialNode(None)
 
   def onSceneEndClose(self, caller, event) -> None:
-    """
-    Called just after the scene is closed.
-    """
-    # If this module is shown while the scene is closed then recreate a new parameter node immediately
-    if self.parent.isEntered:
-      self.initializeParameterNode()
-
-  def initializeParameterNode(self) -> None:
-    """
-    Ensure parameter node exists and observed.
-    """
-    # Parameter node stores all user choices in parameter values, node selections, etc.
-    # so that when the scene is saved and reloaded, these settings are restored.
-
-    self.setParameterNode(self.logic.getParameterNode())
+    """Called just after the scene is closed."""
+    self.parameterSetChanged(None)
 
   def setParameterNode(self, inputParameterNode: Optional[StenosisMeasurement2DParameterNode]) -> None:
     """
     Set and observe parameter node.
-    Observation is needed because when the parameter node is changed then the GUI must be updated immediately.
+    Observation is needed to prevent a crash when working with multiple parameter sets.
+    It may be removed if core is fixed.
     """
 
     if self._parameterNode:
-        self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
+      self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
+      self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._guardDog)
+      self.observeFiducialNode(None)
     self._parameterNode = inputParameterNode
     if self._parameterNode:
-        # Note: in the .ui file, a Qt dynamic property called "SlicerParameterName" is set on each
-        # ui element that needs connection.
-        self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
+      # Note: in the .ui file, a Qt dynamic property called "SlicerParameterName" is set on each
+      # ui element that needs connection.
+      self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
+      self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._guardDog)
+      self.observeFiducialNode(self._parameterNode.inputFiducialNode)
+    self.logic.setParameterNode(self._parameterNode)
+    self.enableWorkSpace()
 
-  def onApplyButton(self) -> None:
+  def _guardDog(self, caller=None, event=None):
+    pass
+
+  def parameterSetChanged(self, newParameterSet):
+    # When all nodes are deleted, the wrapper outputs errors and alien nodes appear in the selector.
+    if not newParameterSet:
+      self.setParameterNode(None)
+      return
+    nextParameterNode = StenosisMeasurement2DParameterNode(newParameterSet)
+    self.setParameterNode(nextParameterNode)
+    self.restoreSegment()
+    self.createOutputBufferTable()
+    self.restorePresentationTable()
+
+  def updateSliceViews(self):
+    parameterNode = self._parameterNode
+    if (not parameterNode) or (parameterNode and not parameterNode.inputVolume):
+      return
+    slicer.util.setSliceViewerLayers(background = parameterNode.inputVolume.GetID(), fit = True)
+
+  def createOutputBufferTable(self):
+    if not self._parameterNode:
+      return
+    # Create an output MRML table if needed.
+    if not self._parameterNode.dataTableNode:
+      presentationTable = self.ui.presentationTableWidget
+      self._parameterNode.dataTableNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode")
+      self._parameterNode.dataTableNode.HideFromEditorsOn()
+      # Store the control point label.
+      controlPointLabelArray = vtk.vtkStringArray()
+      controlPointLabelArray.SetName(presentationTable.horizontalHeaderItem(0).text())
+      self._parameterNode.dataTableNode.AddColumn(controlPointLabelArray)
+      # Store the segment name.
+      segmentNameArray = vtk.vtkStringArray()
+      segmentNameArray.SetName(presentationTable.horizontalHeaderItem(1).text())
+      self._parameterNode.dataTableNode.AddColumn(segmentNameArray)
+      # Store the area value.
+      surfaceAreaLabelArray = vtk.vtkDoubleArray()
+      surfaceAreaLabelArray.SetName(presentationTable.horizontalHeaderItem(2).text())
+      self._parameterNode.dataTableNode.AddColumn(surfaceAreaLabelArray)
+      # Store the model ID.
+      modelVisibilityArray = vtk.vtkStringArray()
+      modelVisibilityArray.SetName("Model ID")
+      self._parameterNode.dataTableNode.AddColumn(modelVisibilityArray)
+      # Store the segment ID.
+      segmentVisibilityArray = vtk.vtkStringArray()
+      segmentVisibilityArray.SetName("Segment ID")
+      self._parameterNode.dataTableNode.AddColumn(segmentVisibilityArray)
+      self._parameterNode.dataTableNode.Modified()
+
+  def onApply(self) -> None:
     if not self._parameterNode.inputSliceNode:
         self.showStatusMessage((_("Select a slice node"),), True)
         return
@@ -325,13 +391,13 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
     if not self.ui.inputSegmentSelector.currentNode():
         self.showStatusMessage((_("Select a segmentation node"),), True)
         return
-    if int(self.currentControlPointID) < 0:
+    if int(self._parameterNode.currentControlPointID) < 0:
         self.showStatusMessage((_("Click on a fiducial control point"),), True)
         return
     with slicer.util.tryWithErrorDisplay(_("Failed to compute results."), waitCursor=True):
         # Get control point index, position and label.
         fiducialNode = self._parameterNode.inputFiducialNode
-        controlPointIndex = fiducialNode.GetNthControlPointIndexByID(self.currentControlPointID)
+        controlPointIndex = fiducialNode.GetNthControlPointIndexByID(self._parameterNode.currentControlPointID)
         currentControlPointPosition = fiducialNode.GetNthControlPointPositionWorld(controlPointIndex)
         currentControlPointLabel = fiducialNode.GetNthControlPointLabel(controlPointIndex)
 
@@ -349,6 +415,16 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
         closestIsland = self._limitToClosestIslandsAction.checked
         applyToAllSegments = self._applyToAllSegmentsAction.checked
         optionCreateCutModel = self._createOutputModelsAction.checked
+
+        # Ensure there's a background volume node.
+        sliceNode = self._parameterNode.inputSliceNode
+        sliceWidget = slicer.app.layoutManager().sliceWidget(sliceNode.GetName())
+        volumeNode = sliceWidget.sliceLogic().GetBackgroundLayer().GetVolumeNode()
+        if volumeNode is None:
+          self.showStatusMessage(_(("No volume node selected in input slice node.", )))
+          return
+        self._parameterNode.inputVolume = volumeNode
+
         tuples = {}
         # Call logic functions.
         if applyToAllSegments:
@@ -364,20 +440,26 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
                            optionCreateCutModel, currentControlPointLabel)
             tuples[segmentID] = tuple
         # Append results in table.
-        self.populateOutputTable(tuples)
+        self.populateTables(tuples)
 
-  # Append mode only. tuples is a dictionary: [segmentID] = (area, model)
-  def populateOutputTable(self, tuples) -> None:
+  '''
+  Append mode only. tuples is a dictionary: [segmentID] = (area, model)
+  Fill the presentation table from the logic's result or from cache.
+  Fill the MRML cache table from the logic's result.
+  '''
+  def populateTables(self, tuples, fromCache: bool = False) -> None:
     fiducialNode = self._parameterNode.inputFiducialNode
-    # Get current control point label.
-    controlPointIndex = fiducialNode.GetNthControlPointIndexByID(self.currentControlPointID)
-    controlPointLabel = fiducialNode.GetNthControlPointLabel(
-        controlPointIndex)
+    if (fiducialNode):
+      # Get current control point label.
+      controlPointIndex = fiducialNode.GetNthControlPointIndexByID(self._parameterNode.currentControlPointID)
+      controlPointLabel = fiducialNode.GetNthControlPointLabel(controlPointIndex)
     # Get list of segment IDs.
     segmentIDs = tuples.keys()
 
     segmentation = self.ui.inputSegmentSelector.currentNode()
-    outputTable = self.ui.outputTableWidget
+    presentationTable = self.ui.presentationTableWidget
+    if not fromCache:
+      dataTableNode = self._parameterNode.dataTableNode
 
     # Get unit for area.
     selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
@@ -385,25 +467,33 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
     # For each segment, append control point label, segment name and area.
     # Reference the output polydata model in the label item (column 0).
     for segmentID in segmentIDs:
-        rowIndex = outputTable.rowCount
-        outputTable.insertRow(rowIndex)
+        rowIndex = presentationTable.rowCount
+        presentationTable.insertRow(rowIndex)
+        if not fromCache:
+          bufferRowIndex = dataTableNode.AddEmptyRow()
         # Control point label
         item = qt.QTableWidgetItem()
         item.setText(controlPointLabel)
-        # Reference the cut model here. We can show/hide/delete it later.
+        ## Reference the cut model here. We can show/hide/delete it later.
         cutModel = tuples[segmentID][1]
         item.setData(qt.Qt.UserRole, cutModel)
-        outputTable.setItem(rowIndex, 0, item)
+        presentationTable.setItem(rowIndex, 0, item)
+        if not fromCache:
+          dataTableNode.GetTable().SetValue(bufferRowIndex, 0, item.text())
         # Segment
         item = qt.QTableWidgetItem()
         item.setText(segmentation.GetSegmentation().GetSegment(segmentID).GetName())
         item.setData(qt.Qt.UserRole, segmentID)
-        outputTable.setItem(rowIndex, 1, item)
+        presentationTable.setItem(rowIndex, 1, item)
+        if not fromCache:
+          dataTableNode.GetTable().SetValue(bufferRowIndex, 1, item.text())
         # Surface area
         item = qt.QTableWidgetItem()
         content = areaUnitNode.GetDisplayStringFromValue(tuples[segmentID][0])
         item.setText(content)
-        outputTable.setItem(rowIndex, 2, item)
+        presentationTable.setItem(rowIndex, 2, item)
+        if not fromCache:
+          dataTableNode.GetTable().SetValue(bufferRowIndex, 2, tuples[segmentID][0])
         # Model visibility. Use a checkbox aligned in a layout.
         """
         The checkbox is always left aligned this way.
@@ -419,11 +509,13 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
         modelLayout.setAlignment(qt.Qt.AlignCenter)
         modelLayout.setContentsMargins(0, 0, 0, 0)
         modelWidget.setLayout(modelLayout)
-        outputTable.setCellWidget(rowIndex, 3, modelWidget)
+        presentationTable.setCellWidget(rowIndex, 3, modelWidget)
         modelCheckBox.connect("toggled(bool)", self.onShowModelCheckBox)
         # Hide it by default. See onCurrentRowChanged() comment.
         modelCheckBox.hide()
         modelCheckBox.checked = cutModel.GetDisplayVisibility()
+        if not fromCache:
+          dataTableNode.GetTable().SetValue(bufferRowIndex, 3, cutModel.GetID())
 
         # Segment visibility.
         segmentWidget = qt.QWidget()
@@ -433,10 +525,41 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
         segmentLayout.setAlignment(qt.Qt.AlignCenter)
         segmentLayout.setContentsMargins(0, 0, 0, 0)
         segmentWidget.setLayout(segmentLayout)
-        outputTable.setCellWidget(rowIndex, 4, segmentWidget)
+        presentationTable.setCellWidget(rowIndex, 4, segmentWidget)
         segmentCheckBox.connect("toggled(bool)", self.onShowSegmentCheckBox)
         segmentCheckBox.hide()
         segmentCheckBox.checked = segmentation.GetDisplayNode().GetSegmentVisibility(segmentID)
+        if not fromCache:
+          dataTableNode.GetTable().SetValue(bufferRowIndex, 4, segmentID)
+
+          dataTableNode.Modified()
+
+  def restorePresentationTable(self): # From the MRML table cache.
+    if not self._parameterNode:
+      return
+    dataTableNode = self._parameterNode.dataTableNode
+    presentationTable = self.ui.presentationTableWidget
+    while (presentationTable.rowCount):
+        presentationTable.removeRow(0)
+    
+    numberOfRows = dataTableNode.GetNumberOfRows()
+    for row in range(numberOfRows):
+      # Don't use one global dictionary; segmentID key may repeat itself.
+      tuples = {} # [segmentID] = [area, modelNode]
+      segmentID = dataTableNode.GetCellText(row, 4)
+      if (not segmentID) or (len(segmentID) == 0):
+        continue
+      area = float(dataTableNode.GetCellText(row, 2))
+      modelID = dataTableNode.GetCellText(row, 3)
+      model = None
+      if (modelID) and (len(modelID)):
+        model = slicer.mrmlScene.GetNodeByID(modelID)
+      tuples[segmentID] = (area, model)
+      self.populateTables(tuples, True)
+      
+      # Fix the fiducial labels. They would all correspond to self._parameterNode.currentControlPointID.
+      item = presentationTable.item(row, 0)
+      item.setText(dataTableNode.GetCellText(row, 0))
 
   """
   Clicking on the model/segment visibility checkbox does not trigger anything in
@@ -446,13 +569,13 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
   visibility of the model/segment referenced in the current row.
   """
   def onCurrentRowChanged(self, currentRow, currentColumn, previousRow, previousColumn) -> None:
-    outputTable = self.ui.outputTableWidget
+    presentationTable = self.ui.presentationTableWidget
     for column in 3, 4:
-        previousCellWidget = outputTable.cellWidget(previousRow, column)
+        previousCellWidget = presentationTable.cellWidget(previousRow, column)
         if previousCellWidget:
             previousCheckBox = previousCellWidget.children()[0]
             previousCheckBox.hide()
-        currentCellWidget = outputTable.cellWidget(currentRow, column)
+        currentCellWidget = presentationTable.cellWidget(currentRow, column)
         if currentCellWidget:
             currentCheckBox = currentCellWidget.children()[0]
             currentCheckBox.show()
@@ -466,18 +589,23 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
     if console:
         logging.info(msg)
 
-  # Convenience process to track the slice orientation at control points.
-  # Called when a fiducial node is clicked.
+  # Set a fiducial node observation to track the slice orientation at control points.
+  # Pass None to remove an observation.
   def observeFiducialNode(self, fiducialNode) -> None:
-    if self._parameterNode.inputFiducialNode and self._parameterNode.inputFiducialNode.GetDisplayNode() and self.fiducialDisplayNodeObservation:
-        # Unobserve an already observed input fiducial node.
+
+    if (self._parameterNode
+        and self._parameterNode.inputFiducialNode # The combobox selection.
+        and self._parameterNode.inputFiducialNode.GetDisplayNode()
+        and self.fiducialDisplayNodeObservation): # It was being observed.
+        # Remove a fiducial observation.
         self._parameterNode.inputFiducialNode.GetDisplayNode().RemoveObserver(self.fiducialDisplayNodeObservation)
         self.fiducialDisplayNodeObservation = None
         message = (_("Fiducial node is no longer observed"),)
         self.showStatusMessage(message)
     # Observe a selected fiducial node.
-    displayNode = fiducialNode.GetDisplayNode()
-    if displayNode:
+    if fiducialNode:
+      displayNode = fiducialNode.GetDisplayNode()
+      if displayNode:
         self.fiducialDisplayNodeObservation = displayNode.AddObserver(slicer.vtkMRMLMarkupsFiducialDisplayNode.JumpToPointEvent, self.onJumpToPoint)
         message = (_("Fiducial node is being observed"),)
         self.showStatusMessage(message)
@@ -485,21 +613,22 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
   """
   Store, restore or reset the orientation part of a sliceToRAS matrix with/from
   a control point's Get/SetOrientation() function.
+  Called when a fiducial node is clicked.
   """
   def onJumpToPoint(self, caller, event) -> None:
     fiducialNode = caller.GetMarkupsNode()
     controlPointIndex = caller.GetActiveControlPoint()
     # Use the UI input slice node.
-    mrmlSliceNode = self._parameterNode.inputSliceNode
-    if not mrmlSliceNode:
+    sliceNode = self._parameterNode.inputSliceNode
+    if not sliceNode:
         message = (_("Slice node not set"),)
         self.showStatusMessage(message, True)
         return
     # Get control point orientation matrix.
-    self.currentControlPointID = fiducialNode.GetNthControlPointID(controlPointIndex)
+    self._parameterNode.currentControlPointID = fiducialNode.GetNthControlPointID(controlPointIndex)
     controlPointOrientationMatrix = vtk.vtkMatrix3x3()
     fiducialNode.GetNthControlPointOrientationMatrixWorld(controlPointIndex, controlPointOrientationMatrix)
-    sliceToRAS = mrmlSliceNode.GetSliceToRAS()
+    sliceToRAS = sliceNode.GetSliceToRAS()
     # Control point orientation has not been set, or has been reset.
     if controlPointOrientationMatrix.IsIdentity():
         # Store the orientation part of a sliceToRAS matrix.
@@ -518,7 +647,7 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
                 value = controlPointOrientationMatrix.GetElement(row, col)
                 sliceToRAS.SetElement(row, col, value)
         # Update slice orientation in UI.
-        mrmlSliceNode.UpdateMatrices()
+        sliceNode.UpdateMatrices()
         message = (_("Slice orientation restored"),)
         self.showStatusMessage(message)
 
@@ -544,6 +673,37 @@ class StenosisMeasurement2DWidget(ScriptedLoadableModuleWidget, VTKObservationMi
     for view in views:
         sliceNode = slicer.app.layoutManager().sliceWidget(view).mrmlSliceNode()
         sliceNode.SetOrientationToDefault()
+
+  # Update the parameter node.
+  def onSegmentationChanged(self, node):
+    if not self._parameterNode:
+      return
+    if self._parameterNode.inputSegmentation == node:
+      return
+    self._parameterNode.inputSegmentation = node
+
+  # Update the parameter node.
+  def onSegmentChanged(self, segmentID):
+    if not self._parameterNode:
+      return
+    if self._parameterNode.inputSegmentID == segmentID:
+      return
+    self._parameterNode.inputSegmentID = segmentID
+
+  # Update the segmentation widgets from the parameter node.
+  def restoreSegment(self):
+    segmentSelector = self.ui.inputSegmentSelector
+    wasBlocked = segmentSelector.blockSignals(True)
+    segmentSelector.setCurrentNode(self._parameterNode.inputSegmentation)
+    segmentSelector.setCurrentSegmentID(self._parameterNode.inputSegmentID)
+    segmentSelector.blockSignals(wasBlocked)
+
+  # Selecting a parameter set is an entry point.
+  def enableWorkSpace(self):
+    enabled = (self._parameterNode is not None)
+    for widget in self.workSpaceWidgets:
+      widget.setEnabled(enabled)
+
 #
 # StenosisMeasurement2DLogic
 #
@@ -554,9 +714,23 @@ class StenosisMeasurement2DLogic(ScriptedLoadableModuleLogic):
     Called when the logic class is instantiated. Can be used for initializing member variables.
     """
     ScriptedLoadableModuleLogic.__init__(self)
+    self._parameterNode = None
+
+  def setParameterNode(self, parameterNode):
+    self._parameterNode = parameterNode
 
   def getParameterNode(self):
-    return StenosisMeasurement2DParameterNode(super().getParameterNode())
+    return self._parameterNode
+
+  # This is a facility for scripting.
+  def generateParameterNode(self, scriptedModule: slicer.vtkMRMLScriptedModuleNode = None):
+    if not scriptedModule:
+      superScriptedModule = super().getParameterNode()
+      # This one must not appear in the parameter set selector.
+      superScriptedModule.SetAttribute("ModuleName", "Scripted" + self.moduleName)
+      return StenosisMeasurement2DParameterNode(superScriptedModule)
+    else:
+      return StenosisMeasurement2DParameterNode(scriptedModule)
 
   # Core function.
   def processSegment(self, inputSegmentation, segmentID,
