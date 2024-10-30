@@ -1,3 +1,5 @@
+## EXPERIMENTAL BRANCH - DO NOT USE IN PRODUCTION
+
 The VMTK Extension for 3D Slicer
 --------------------------------
 
