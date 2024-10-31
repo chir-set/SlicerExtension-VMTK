@@ -16,6 +16,7 @@ from slicer.parameterNodeWrapper import (
 )
 
 from slicer import vtkMRMLScalarVolumeNode
+from slicer import vtkMRMLSegmentationNode
 
 
 #
@@ -55,6 +56,9 @@ class ArterialCalcificationPreProcessorParameterNode:
     """
     inputVolume: slicer.vtkMRMLScalarVolumeNode
     marginSize: float = 4.0
+    
+    inputSegmentation: slicer.vtkMRMLSegmentationNode
+    inputSegmentID: str = ""
 
 #
 # ArterialCalcificationPreProcessorWidget
@@ -87,6 +91,9 @@ class ArterialCalcificationPreProcessorWidget(ScriptedLoadableModuleWidget, VTKO
         uiWidget = slicer.util.loadUI(self.resourcePath('UI/ArterialCalcificationPreProcessor.ui'))
         self.layout.addWidget(uiWidget)
         self.ui = slicer.util.childWidgetVariables(uiWidget)
+        
+        self.workSpaceWidgets = [self.ui.inputsCollapsibleButton,
+                            self.ui.applyButton]
 
         # Set scene in MRML widgets. Make sure that in Qt designer the top-level qMRMLWidget's
         # "mrmlSceneChanged(vtkMRMLScene*)" signal in is connected to each MRML widget's.
@@ -96,12 +103,19 @@ class ArterialCalcificationPreProcessorWidget(ScriptedLoadableModuleWidget, VTKO
         # Create logic class. Logic implements all computations that should be possible to run
         # in batch mode, without a graphical user interface.
         self.logic = ArterialCalcificationPreProcessorLogic()
+        self.ui.parameterSetSelector.addAttribute("vtkMRMLScriptedModuleNode", "ModuleName", self.moduleName)
 
         # Connections
+        self.ui.parameterSetSelector.connect('currentNodeChanged(vtkMRMLNode*)', self.parameterSetChanged)
+        self.ui.parameterSetSelector.connect('currentNodeChanged(vtkMRMLNode*)', self.updateSliceViews)
 
         # These connections ensure that we update parameter node when scene is closed
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
+        
+        # Application connections
+        self.ui.inputSegmentSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSegmentationChanged)
+        self.ui.inputSegmentSelector.connect("currentSegmentChanged(QString)", self.onSegmentChanged)
         
         self.ui.applyButton.menu().clear()
         self._show3DAction = qt.QAction(_("Show 3D on success"))
@@ -112,8 +126,14 @@ class ArterialCalcificationPreProcessorWidget(ScriptedLoadableModuleWidget, VTKO
         # Buttons
         self.ui.applyButton.connect('clicked(bool)', self.onApplyButton)
 
-        # Make sure parameter node is initialized (needed for module reload)
-        self.initializeParameterNode()
+        # Let the parameter set be None; a study can thus be selected from a loaded saved scene.
+        if self.ui.parameterSetSelector.nodeCount():
+            wasBlocked = self.ui.parameterSetSelector.blockSignals(True)
+            self.ui.parameterSetSelector.setCurrentNode(None)
+            self.ui.parameterSetSelector.blockSignals(wasBlocked)
+        
+        # A parameter set must be selected to use the module.
+        self.enableWorkSpace()
 
     def cleanup(self) -> None:
         """
@@ -122,71 +142,71 @@ class ArterialCalcificationPreProcessorWidget(ScriptedLoadableModuleWidget, VTKO
         self.removeObservers()
 
     def enter(self) -> None:
-        """
-        Called each time the user opens this module.
-        """
+        """Called each time the user opens this module."""
         # Make sure parameter node exists and observed
-        self.initializeParameterNode()
+        if self._parameterNode:
+            self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
 
     def exit(self) -> None:
-        """
-        Called each time the user opens a different module.
-        """
+        """Called each time the user opens a different module."""
         # Do not react to parameter node changes (GUI will be updated when the user enters into the module)
         if self._parameterNode:
             self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
             self._parameterNodeGuiTag = None
-
+      
     def onSceneStartClose(self, caller, event) -> None:
-        """
-        Called just before the scene is closed.
-        """
-        # Parameter node will be reset, do not use it anymore
-        self.setParameterNode(None)
+        """Called just before the scene is closed."""
 
     def onSceneEndClose(self, caller, event) -> None:
-        """
-        Called just after the scene is closed.
-        """
-        # If this module is shown while the scene is closed then recreate a new parameter node immediately
-        if self.parent.isEntered:
-            self.initializeParameterNode()
-
-    def initializeParameterNode(self) -> None:
-        """
-        Ensure parameter node exists and observed.
-        """
-        # Parameter node stores all user choices in parameter values, node selections, etc.
-        # so that when the scene is saved and reloaded, these settings are restored.
-
-        self.setParameterNode(self.logic.getParameterNode())
+        """Called just after the scene is closed."""
+        self.parameterSetChanged(None)
 
     def setParameterNode(self, inputParameterNode: Optional[ArterialCalcificationPreProcessorParameterNode]) -> None:
         """
         Set and observe parameter node.
-        Observation is needed because when the parameter node is changed then the GUI must be updated immediately.
+        Observation is needed to prevent a crash when working with multiple parameter sets.
+        It may be removed if core is fixed.
         """
 
         if self._parameterNode:
             self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
+            self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._guardDog)
         self._parameterNode = inputParameterNode
         if self._parameterNode:
             # Note: in the .ui file, a Qt dynamic property called "SlicerParameterName" is set on each
             # ui element that needs connection.
-            self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
+                self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
+                self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._guardDog)
+        self.logic.setParameterNode(self._parameterNode)
+        self.enableWorkSpace()
+
+    def _guardDog(self, caller=None, event=None):
+        pass
+
+    def parameterSetChanged(self, newParameterSet):
+        # When all nodes are deleted, the wrapper outputs errors and alien nodes appear in the selector.
+        if not newParameterSet:
+            self.setParameterNode(None)
+            return
+        nextParameterNode = ArterialCalcificationPreProcessorParameterNode(newParameterSet)
+        self.setParameterNode(nextParameterNode)
+        self.restoreSegment()
+
+    def updateSliceViews(self):
+        parameterNode = self._parameterNode
+        if (not parameterNode) or (parameterNode and not parameterNode.inputVolume):
+            return
+        slicer.util.setSliceViewerLayers(background = parameterNode.inputVolume.GetID(), fit = True)
 
     def onApplyButton(self) -> None:
 
-        inputSegmentation = self.ui.segmentSelector.currentNode()
+        inputSegmentation = self.ui.inputSegmentSelector.currentNode()
         optionShow3D = self._show3DAction.checked
         
         with slicer.util.tryWithErrorDisplay(_("Failed to compute results."), waitCursor=True):
             
             # Compute output
-            self.logic.process(inputSegmentation,
-                               self._parameterNode.inputVolume,
-                               self.ui.segmentSelector.currentSegmentID(),
-                               self._parameterNode.marginSize)
+            self.logic.process()
         
         if (not optionShow3D) or (not inputSegmentation):
             return
@@ -194,6 +214,36 @@ class ArterialCalcificationPreProcessorWidget(ScriptedLoadableModuleWidget, VTKO
         # Poked from qMRMLSegmentationShow3DButton.cxx
         if inputSegmentation.GetSegmentation().CreateRepresentation(slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName()):
             inputSegmentation.GetDisplayNode().SetPreferredDisplayRepresentationName3D(slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName())
+
+    # Update the parameter node.
+    def onSegmentationChanged(self, node):
+        if not self._parameterNode:
+            return
+        if self._parameterNode.inputSegmentation == node:
+            return
+        self._parameterNode.inputSegmentation = node
+
+    # Update the parameter node.
+    def onSegmentChanged(self, segmentID):
+        if not self._parameterNode:
+            return
+        if self._parameterNode.inputSegmentID == segmentID:
+            return
+        self._parameterNode.inputSegmentID = segmentID
+
+    # Update the segmentation widgets from the parameter node.
+    def restoreSegment(self):
+        segmentSelector = self.ui.inputSegmentSelector
+        wasBlocked = segmentSelector.blockSignals(True)
+        segmentSelector.setCurrentNode(self._parameterNode.inputSegmentation)
+        segmentSelector.setCurrentSegmentID(self._parameterNode.inputSegmentID)
+        segmentSelector.blockSignals(wasBlocked)
+
+    # Selecting a parameter set is an entry point.
+    def enableWorkSpace(self):
+        enabled = (self._parameterNode is not None)
+        for widget in self.workSpaceWidgets:
+            widget.setEnabled(enabled)
 
 #
 # ArterialCalcificationPreProcessorLogic
@@ -206,15 +256,30 @@ class ArterialCalcificationPreProcessorLogic(ScriptedLoadableModuleLogic):
         Called when the logic class is instantiated. Can be used for initializing member variables.
         """
         ScriptedLoadableModuleLogic.__init__(self)
+        self._parameterNode = None
+
+    def setParameterNode(self, parameterNode):
+        self._parameterNode = parameterNode
 
     def getParameterNode(self):
-        return ArterialCalcificationPreProcessorParameterNode(super().getParameterNode())
+        return self._parameterNode
 
-    def process(self,
-                inputSegmentation: slicer.vtkMRMLSegmentationNode,
-                inputVolume: slicer.vtkMRMLScalarVolumeNode,
-                segmentID,
-                marginSize: float = 4.0) -> None:
+    # This is a facility for scripting.
+    def generateParameterNode(self, scriptedModule: slicer.vtkMRMLScriptedModuleNode = None):
+        if not scriptedModule:
+            superScriptedModule = super().getParameterNode()
+            # This one must not appear in the parameter set selector.
+            superScriptedModule.SetAttribute("ModuleName", "Scripted" + self.moduleName)
+            return ArterialCalcificationPreProcessorParameterNode(superScriptedModule)
+        else:
+            return ArterialCalcificationPreProcessorParameterNode(scriptedModule)
+
+    def process(self) -> None:
+
+        inputSegmentation = self._parameterNode.inputSegmentation
+        inputVolume = self._parameterNode.inputVolume
+        segmentID = self._parameterNode.inputSegmentID
+        marginSize = self._parameterNode.marginSize
 
         if not inputSegmentation or not inputVolume or not segmentID or segmentID == "":
             raise ValueError(_("Input segmentation, volume or segment ID is invalid"))
@@ -245,6 +310,9 @@ class ArterialCalcificationPreProcessorLogic(ScriptedLoadableModuleLogic):
         # Create segment editor object if needed.
         segmentEditorModuleWidget = slicer.util.getModuleWidget("SegmentEditor")
         seWidget = segmentEditorModuleWidget.editor
+        seWidget.setSegmentationNode(inputSegmentation)
+        seWidget.setSourceVolumeNode(inputVolume)
+        inputSegmentation.SetReferenceImageGeometryParameterFromVolumeNode(inputVolume)
         seWidget.mrmlSegmentEditorNode().SetMaskMode(slicer.vtkMRMLSegmentationNode.EditAllowedEverywhere)
         seWidget.mrmlSegmentEditorNode().SourceVolumeIntensityMaskOff()
         seWidget.mrmlSegmentEditorNode().SetOverwriteMode(seWidget.mrmlSegmentEditorNode().OverwriteNone)
