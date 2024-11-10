@@ -57,6 +57,7 @@ class GuidedArterySegmentationParameterNode:
   #      - either the module is not loaded or the parameter node complains (1).
   inputCurveNode: slicer.vtkMRMLMarkupsCurveNode
   inputSliceNode: slicer.vtkMRMLSliceNode
+  inputShapeNodeID: str = ""
   tubeDiameter: float = 8.0
   intensityTolerance: int = 100
   neighbourhoodSize: float = 2.0
@@ -68,6 +69,11 @@ class GuidedArterySegmentationParameterNode:
   outputCenterlineModelNode: slicer.vtkMRMLModelNode
   outputCenterlineCurveNode: slicer.vtkMRMLMarkupsCurveNode
 
+  def getShapeNode(self):
+    return slicer.mrmlScene.GetNodeByID(self.inputShapeNodeID) if self.inputShapeNodeID else None
+
+  def setShapeNode(self, node):
+    self.inputShapeNodeID = node.GetID() if node else ""
 #
 # GuidedArterySegmentationWidget
 #
@@ -173,11 +179,10 @@ class GuidedArterySegmentationWidget(ScriptedLoadableModuleWidget, VTKObservatio
 
   def onShapeNode(self, node) -> None:
     if self._parameterNode:
-      self._parameterNode.parameterNode.SetNodeReferenceID("inputShapeNode", None if not node else node.GetID())
+      self._parameterNode.setShapeNode(node)
     if node is None:
         self.ui.tubeDiameterSpinBoxLabel.setVisible(True)
         self.ui.tubeDiameterSpinBox.setVisible(True)
-        self.logic.setShapeNode(node)
         return
     if node.GetShapeName() != slicer.vtkMRMLMarkupsShapeNode().Tube:
         self.inform(_("Shape node is not a Tube."))
@@ -190,7 +195,6 @@ class GuidedArterySegmentationWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.ui.tubeDiameterSpinBoxLabel.setVisible(True)
         self.ui.tubeDiameterSpinBox.setVisible(True)
         return
-    self.logic.setShapeNode(node)
     self.ui.tubeDiameterSpinBoxLabel.setVisible(False)
     self.ui.tubeDiameterSpinBox.setVisible(False)
 
@@ -342,8 +346,7 @@ class GuidedArterySegmentationWidget(ScriptedLoadableModuleWidget, VTKObservatio
     self._updatingGUIFromParameterNode = True
 
     # The shape node is not managed by the parameter node wrapper.
-    inputShapeNode = self._parameterNode.parameterNode.GetNodeReference("inputShapeNode")
-    self.logic.setShapeNode(inputShapeNode)
+    inputShapeNode = self._parameterNode.getShapeNode()
     self.ui.inputShapeSelector.setCurrentNode(inputShapeNode)
     self.ui.extentCollapsibleGroupBox.checked = (inputShapeNode is not None)
 
@@ -374,7 +377,6 @@ class GuidedArterySegmentationLogic(ScriptedLoadableModuleLogic):
     Called when the logic class is instantiated. Can be used for initializing member variables.
     """
     ScriptedLoadableModuleLogic.__init__(self)
-    self._shapeNode = None
     self._parameterNode = None
 
   def setParameterNode(self, parameterNode):
@@ -392,14 +394,6 @@ class GuidedArterySegmentationLogic(ScriptedLoadableModuleLogic):
       return GuidedArterySegmentationParameterNode(superScriptedModule)
     else:
       return GuidedArterySegmentationParameterNode(scriptedModule)
-
-  def setShapeNode(self, shapeNode) -> None:
-    if shapeNode == self._shapeNode:
-      return
-    self._shapeNode = shapeNode
-
-  def getShapeNode(self):
-    return self._shapeNode
 
   def showStatusMessage(self, messages) -> None:
     separator = " "
@@ -443,7 +437,8 @@ class GuidedArterySegmentationLogic(ScriptedLoadableModuleLogic):
     seWidget.mrmlSegmentEditorNode().SourceVolumeIntensityMaskOff()
     seWidget.mrmlSegmentEditorNode().SetOverwriteMode(seWidget.mrmlSegmentEditorNode().OverwriteNone)
 
-    if self._shapeNode is None:
+    shapeNode = self._parameterNode.getShapeNode()
+    if shapeNode is None:
       #---------------------- Draw tube with VTK---------------------
       # https://discourse.slicer.org/t/converting-markupscurve-to-markupsfiducial/20246/3
       tube = vtk.vtkTubeFilter()
@@ -455,7 +450,7 @@ class GuidedArterySegmentationLogic(ScriptedLoadableModuleLogic):
       tubeMaskSegmentId = segmentation.AddSegmentFromClosedSurfaceRepresentation(tube.GetOutput(), "TubeMask")
     else:
       #---------------------- Draw tube from Shape node ---------------------
-      tubeMaskSegmentId = segmentation.AddSegmentFromClosedSurfaceRepresentation(self._shapeNode.GetCappedTubeWorld(), "TubeMask")
+      tubeMaskSegmentId = segmentation.AddSegmentFromClosedSurfaceRepresentation(shapeNode.GetCappedTubeWorld(), "TubeMask")
     # Select it so that Split Volume can work on this specific segment only.
     seWidget.setCurrentSegmentID(tubeMaskSegmentId)
 
