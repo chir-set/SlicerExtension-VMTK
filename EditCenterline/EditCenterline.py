@@ -525,17 +525,18 @@ class EditCenterlineLogic(ScriptedLoadableModuleLogic):
         """
         import GuidedVeinSegmentation
         gvsLogic = GuidedVeinSegmentation.GuidedVeinSegmentationLogic()
-        segmentID = gvsLogic.process(
-            inputCurve = curveNode,
-            inputVolume =  volumeNode,
-            inputSegmentation = segmentationNode,
-            extrusionKernelSize = profile["extrusionKernelSize"],
-            gaussianStandardDeviation = profile["gaussianStandardDeviation"],
-            seedRadius = profile["seedRadius"],
-            shellMargin = profile["shellMargin"],
-            shellThickness = profile["shellThickness"],
-            subtractOtherSegments = False # Do not account for prior work in the same segmentation.
-            )
+        gvsParameterNode = gvsLogic.generateParameterNode()
+        gvsParameterNode.inputCurve = curveNode
+        gvsParameterNode.inputVolume =  volumeNode
+        gvsParameterNode.inputSegmentation = segmentationNode
+        gvsParameterNode.extrusionKernelSize = profile["extrusionKernelSize"]
+        gvsParameterNode.gaussianStandardDeviation = profile["gaussianStandardDeviation"]
+        gvsParameterNode.seedRadius = profile["seedRadius"]
+        gvsParameterNode.shellMargin = profile["shellMargin"]
+        gvsParameterNode.shellThickness = profile["shellThickness"]
+        gvsParameterNode.subtractOtherSegments = False # Do not account for prior work in the same segmentation.
+        gvsLogic.setParameterNode(gvsParameterNode)
+        segmentID = gvsLogic.process()
         segmentationNode.CreateClosedSurfaceRepresentation()
         # At this step, the segment editor is already setup.
 
